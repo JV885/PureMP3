@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+
+# PyInstaller
+*.spec
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# FFmpeg (Local binaries)
+ffmpeg.exe
+ffprobe.exe
+
+# App Specific (Personal Music Folder)
+Music/
+*.mp3
+*.log
+
+# VS Code / IDE
+.vscode/
+.idea/
+.gemini/
