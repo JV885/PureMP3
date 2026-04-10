@@ -15,6 +15,9 @@ jobs:
   build-windows:
     name: 🪟 Build Windows EXE
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - name: ⬇️ Checkout repository
@@ -28,25 +31,27 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install pyinstaller customtkinter yt-dlp mutagen musicbrainzngs requests pygame pillow
+          echo "Dependencies installed successfully."
           
       - name: ⬇️ Download FFmpeg
-        shell: pwsh
         run: |
-          echo "Downloading FFmpeg Essentials build..."
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip"
+          echo "Starting FFmpeg download..."
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip" -UseBasicParsing
           Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg_temp"
           $ffmpeg_dir = Get-ChildItem -Path "ffmpeg_temp" -Directory | Select-Object -First 1
           Copy-Item "$($ffmpeg_dir.FullName)\bin\ffmpeg.exe" -Destination "."
           Copy-Item "$($ffmpeg_dir.FullName)\bin\ffprobe.exe" -Destination "."
           Remove-Item "ffmpeg.zip"
           Remove-Item -Recurse "ffmpeg_temp"
+          echo "FFmpeg binaries placed in root."
 
       - name: 🏷️ Stamp version into source
-        shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
+          echo "Stamping version $tag into PureMP3.py"
           (Get-Content PureMP3.py) | ForEach-Object {
             $_ -replace 'APP_VERSION_TAG\s*=\s*"v[\d\.]+"', "APP_VERSION_TAG   = `"$tag`""
           } | Set-Content PureMP3.py
@@ -111,13 +116,12 @@ jobs:
           body: |
             ## 📦 JV PureMP3  ${{ github.ref_name }}
 
-            ### Downloads
-            | Platform | File | Notes |
-            |----------|------|-------|
-            | 🪟 Windows | `jv_puremp3.exe` | Single-file, no install needed |
+            This is an automated build of JV PureMP3.
 
-            > **Auto-update**: If you already have JV PureMP3 installed, it will
-            > detect this release on next launch and offer to update automatically.
+            ### 🪟 Windows Installation
+            Download the `jv_puremp3.exe` below. It is a portable application and requires no installation.
+
+            > **Note**: Your security software might flag this as 'unknown' because it is a new, unsigned open-source project. You can safely click 'Run anyway'.
 
             ---
           files: |
