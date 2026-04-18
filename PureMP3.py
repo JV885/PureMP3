@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║            JV PureMP3  —  v1.0.0                               ║
+║            JV PureMP3  —  v1.1.0                               ║
 ║          Your Pure Audio Pipeline. | JV Labs                   ║
 ╚══════════════════════════════════════════════════════════════════════╝
 Dependencies:
@@ -82,7 +82,7 @@ self_heal()
 
 # ❗ CONFIGURE THESE TWO CONSTANTS TO MATCH YOUR REPOSITORY
 GITHUB_REPO       = "JV885/PureMP3"
-APP_VERSION_TAG   = "v1.0.0"                         # Must match the git tag pushed
+APP_VERSION_TAG   = "v1.1.0"                         # Must match the git tag pushed
 _PLATFORM         = sys.platform                     # "win32" | "android" | "linux"
 _GITHUB_API       = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 _IS_FROZEN        = getattr(sys, 'frozen', False)    # True when bundled by PyInstaller
@@ -289,7 +289,7 @@ except ImportError:
 try:
     import musicbrainzngs
     MB_AVAILABLE = True
-    musicbrainzngs.set_useragent(f"PureMP3-Downloader", "2.0.0", "contact: jvcb885@fb")
+    musicbrainzngs.set_useragent(f"PureMP3-Downloader", "1.1.0", "contact: jvcb885@fb")
 except ImportError:
     MB_AVAILABLE = False
 
@@ -415,6 +415,17 @@ def fmt_bytes(n: float) -> str:
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} TB"
+    
+def fmt_views(n: int) -> str:
+    """Format large numbers into 1.2B, 300M, etc."""
+    if n < 0: return "—"
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}B".replace(".0B", "B")
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K".replace(".0K", "K")
+    return str(n)
 
 
 def fmt_time(seconds: float) -> str:
@@ -464,6 +475,7 @@ class DownloadEngine:
 
     def __init__(self, urls: list[str], save_folder: str,
                  clean_names: bool, skip_dupes: bool, use_prefix: bool, strip_symbols: bool,
+                 author_first: bool,
                  log_queue: queue.Queue, ffmpeg_path: str = ""):
         self.urls        = urls
         self.save_folder = save_folder
@@ -471,6 +483,7 @@ class DownloadEngine:
         self.skip_dupes  = skip_dupes
         self.use_prefix  = use_prefix
         self.strip_symbols = strip_symbols
+        self.author_first = author_first
         self.ffmpeg_path = ffmpeg_path
         self.q           = log_queue
         self._stop       = threading.Event()
@@ -609,11 +622,44 @@ class DownloadEngine:
             # 1. FETCH METADATA PRE-DOWNLOAD
             t0 = time.time()
             core_title = "Unknown"
+            artist_meta = "Unknown Artist"
+            track_meta = "Unknown"
             try:
                 with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True}) as ydl:
                     info = ydl.extract_info(url, download=False)
                     title_raw = info.get("title", "Unknown Title")
-                    core_title = safe_filename(strip_non_ascii(clean_filename(title_raw)))
+                    
+                    # Enhanced Metadata Extraction
+                    # 1. Get raw fields
+                    artist_raw = info.get("artist") or info.get("uploader", "Unknown Artist").replace(" - Topic", "")
+                    track_raw = info.get("track") or clean_filename(title_raw)
+                    
+                    # 2. Prevent duplication: if track_raw already includes the artist, strip it
+                    a_clean = artist_raw.strip()
+                    t_clean = track_raw.strip()
+                    
+                    # Check if artist is already part of the track title string
+                    if a_clean.lower() in t_clean.lower():
+                        # Specifically look for 'Artist - Title' or 'Title - Artist' patterns
+                        # to cleanly remove the artist part.
+                        pattern1 = re.compile(re.escape(a_clean) + r'\s*[-–—|_]\s*', re.IGNORECASE)
+                        pattern2 = re.compile(r'\s*[-–—|_]\s*' + re.escape(a_clean), re.IGNORECASE)
+                        t_clean = pattern1.sub('', t_clean)
+                        t_clean = pattern2.sub('', t_clean)
+                        
+                    # Fallback if stripping made it empty
+                    if not t_clean.strip(): t_clean = clean_filename(title_raw)
+                    
+                    artist_meta = a_clean
+                    track_meta = t_clean
+                    
+                    # 3. Compose final name based on convention
+                    if self.author_first:
+                        composed = f"{artist_meta} - {track_meta}"
+                    else:
+                        composed = f"{track_meta} - {artist_meta}"
+                        
+                    core_title = safe_filename(strip_non_ascii(clean_filename(composed)))
                     self._post("log", level="header", msg=f"📊 Identity: {core_title}")
             except:
                 core_title = safe_filename(strip_non_ascii(url))
@@ -674,18 +720,19 @@ class DownloadEngine:
                     
                     self._post("log", level="info", msg="✨  Metadata: Scrubbing and Injecting ID3 Tags...")
                     # Tag with CLEAN metadata
-                    artist = parse_artist_from_title(base_name) or "Unknown Artist"
-                    inject_metadata(mp3_file, base_name, artist)
+                    inject_metadata(mp3_file, track_meta, artist_meta)
 
                     self._post("log", level="info", msg="📁  Finalizing: Organizing folder and renaming...")
                     # 5. Rename with prefix for Filename order
-                    final_filename = base_name
+                    final_filename = core_title
                     if self.use_prefix:
-                        final_filename = f"{next_prefix:02d} - {base_name}"
+                        final_filename = f"{next_prefix:02d} - {core_title}"
                         next_prefix += 1 # ONLY INCREMENT ON ACTIVE NEW DOWNLOAD
                         
                     new_path = os.path.join(self.save_folder, f"{safe_filename(final_filename)}.mp3")
                     if not os.path.exists(new_path) or new_path == mp3_file:
+                        if os.path.exists(new_path) and new_path != mp3_file:
+                            os.remove(new_path) # Overwrite if logic creates same name
                         os.rename(mp3_file, new_path)
                         mp3_file = new_path
                     
@@ -750,6 +797,7 @@ class BisayaMusicHubApp(ctk.CTk):
         self._log_queue: queue.Queue = queue.Queue()
         self._batch_start_time: float = 0
         self._library_modal = None
+        self._naming_var = ctk.BooleanVar(value=False)
 
         # Build UI
         self._build_ui()
@@ -1302,6 +1350,8 @@ class BisayaMusicHubApp(ctk.CTk):
              "Strict removal of restricted characters (: * ? etc)"),
             ("📻  Autoplay after Download", self._autoplay_var,
              "Automatically play tracks as soon as they finish"),
+            ("🏷️  Author - Title Convention", self._naming_var,
+             "ON: Artist - Song | OFF: Song - Artist"),
         ]):
             sw = ctk.CTkSwitch(
                 opts_frame, text=text,
@@ -2051,13 +2101,13 @@ class BisayaMusicHubApp(ctk.CTk):
         # 2. SMART INTENT: Filter for Original/Remix/Cover
         if tg == "Original":
             # Extra strict filtering for original recordings
-            query_str += ' AND NOT (remix OR cover OR tribute OR AI OR "8-bit" OR instrumental OR karaoke OR medley OR parody)'
+            query_str += ' AND NOT (remix OR cover OR tribute OR AI OR "8-bit" OR "8 bit" OR instrumental OR karaoke OR medley OR parody OR commentary OR "behind the scenes" OR bts OR live OR session OR concert OR mashup)'
         elif tg == "Remix":
-            query_str += ' AND (remix OR edit OR "re-work")'
+            query_str += ' AND (remix OR edit OR "re-work" OR shuffle)'
         elif tg == "Cover":
             query_str += ' AND (cover OR tribute OR "re-recording")'
         elif tg == "AI Version":
-            query_str += ' AND (AI OR "voice-model" OR rvc)'
+            query_str += ' AND (AI OR "voice-model" OR rvc OR "ai cover")'
 
         mode_desc = "[Natural]" if is_natural else f"[Batch: {target_count}]"
         self._log(f"🔎 Engine: {mode_desc} (Strict Identity Guard) Searching...", level="info")
@@ -2132,6 +2182,8 @@ class BisayaMusicHubApp(ctk.CTk):
                         score = int(rec.get('ext:score', 0))
                         release_count = len(rec.get('release-list', []))
                         rec['_rank'] = score + (release_count * 10) 
+                        rec['yt_url'] = None # Placeholder
+                        rec['views'] = 0     # Placeholder
                         
                         all_recordings.append(rec)
                         seen_keys.add(identity)
@@ -2156,9 +2208,30 @@ class BisayaMusicHubApp(ctk.CTk):
                 return
 
             self._last_recordings = all_recordings
+            
+            # --- NEW: PARALLEL VIEW RESOLUTION (PRE-FETCH) ---
+            self._log(f"⚡ Discovery complete. Now ranking {len(all_recordings)} tracks by views...", level="info")
+            
+            from concurrent.futures import ThreadPoolExecutor
+            
+            def resolve_one(rec):
+                query = f"{rec['artist-credit'][0]['artist']['name']} - {rec['title']}"
+                res = self._resolve_yt_link(query)
+                if res:
+                    rec['yt_url'], rec['views'] = res
+                return rec
+
+            # Resolve in parallel (max 5 threads to avoid YouTube rate limits)
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                list(executor.map(resolve_one, all_recordings))
+
+            # CRITICAL: STRICT SORT BY VIEWS (Highest First)
+            all_recordings.sort(key=lambda x: x.get('views', 0), reverse=True)
+            self._last_recordings = all_recordings
+
             self.after(0, lambda: self._view_results_btn.configure(state="normal", fg_color=ACCENT_BLUE))
-            self.after(400, self._show_selection_dashboard) # Instant HUD Update
-            self._log(f"✅ Found {len(all_recordings)} potential tracks! Dashboard Opened.", level="success")
+            self.after(0, self._show_selection_dashboard) 
+            self._log(f"✅ Success: {len(all_recordings)} tracks ranked and ready!", level="success")
             
         except Exception as e:
             self._log(f"⚠ Engine Error: {e}", level="error")
@@ -2166,83 +2239,118 @@ class BisayaMusicHubApp(ctk.CTk):
             self.after(0, lambda: self._search_btn.configure(state="normal", text="🚀   FIND & QUEUE TRACKS"))
 
     def _show_selection_dashboard(self):
-        """Opens a modal to select specific tracks from the discovery results."""
+        """Opens a modern modal to select tracks with real-time view resolution."""
         if not self._last_recordings: return
 
         top = ctk.CTkToplevel(self)
         top.title("DISCOVERY SELECTION DASHBOARD")
-        top.geometry("600x700")
+        top.geometry("700x750")
         top.attributes("-topmost", True)
         top.configure(fg_color=BG_DARK)
+        self._center_window(top, 700, 750)
 
-        # Header
-        ctk.CTkLabel(top, text="BATCH SELECTION", font=ctk.CTkFont(size=18, weight="bold"), text_color=ACCENT_TEAL).pack(pady=(10, 2))
+        # Header Section
+        header = ctk.CTkFrame(top, fg_color=BG_PANEL, corner_radius=0, height=100)
+        header.pack(fill="x", side="top")
+        header.pack_propagate(False)
+
+        ctk.CTkLabel(header, text="DISCOVERY SELECTION", font=ctk.CTkFont(size=20, weight="bold"), text_color=ACCENT_TEAL).pack(pady=(15, 2))
+        
+        info_frame = ctk.CTkFrame(header, fg_color="transparent")
+        info_frame.pack()
         
         total_count = len(self._last_recordings)
-        counter_lbl = ctk.CTkLabel(top, text=f"{total_count}/{total_count} Selected", font=ctk.CTkFont(size=12, weight="bold"), text_color=ACCENT_BLUE)
-        counter_lbl.pack(pady=2)
+        counter_lbl = ctk.CTkLabel(info_frame, text=f"{total_count}/{total_count} Selected", font=ctk.CTkFont(size=12, weight="bold"), text_color=ACCENT_BLUE)
+        counter_lbl.pack(side="left", padx=10)
 
-        def update_counter(*args):
-            sel_count = sum(1 for v, _ in check_vars if v.get())
-            counter_lbl.configure(text=f"{sel_count}/{total_count} Selected")
-
-        ctk.CTkLabel(top, text=f"Found {total_count} unique songs. Click to resolve YouTube links.", 
-                     font=ctk.CTkFont(size=11), text_color=TEXT_MUTED).pack(pady=(0, 10))
+        ctk.CTkLabel(info_frame, text="✅ Rank by views complete", font=ctk.CTkFont(size=11), text_color=ACCENT_GREEN).pack(side="left", padx=10)
 
         # Scrollable area
-        f = ctk.CTkScrollableFrame(top, fg_color=BG_PANEL, corner_radius=12)
-        f.pack(expand=True, fill="both", padx=20, pady=10)
+        f = ctk.CTkScrollableFrame(top, fg_color=BG_DARK, corner_radius=0)
+        f.pack(expand=True, fill="both", padx=5, pady=5)
 
         check_vars = []
-        for rec in self._last_recordings:
+        view_labels = {} # Store label widgets to update them
+
+        for i, rec in enumerate(self._last_recordings):
             title = rec.get('title', 'Unknown')
             artist = 'Unknown Artist'
             if rec.get('artist-credit'):
                 artist = rec['artist-credit'][0].get('artist', {}).get('name', 'Unknown')
             
+            # Card Container
+            card = ctk.CTkFrame(f, fg_color=BG_PANEL, corner_radius=10, height=50)
+            card.pack(fill="x", padx=15, pady=4)
+            card.pack_propagate(False)
+
             var = ctk.BooleanVar(value=True)
-            var.trace_add("write", update_counter) # Real-Time Sync
-            check_vars.append((var, f"{artist} - {title}"))
+            def update_counter(*args):
+                sel_count = sum(1 for v, _ in check_vars if v.get())
+                counter_lbl.configure(text=f"{sel_count}/{total_count} Selected")
+            var.trace_add("write", update_counter) 
+            check_vars.append((var, f"{artist} - {title}", rec))
             
-            cb = ctk.CTkCheckBox(f, text=f"{artist} - {title}", variable=var, 
-                                 font=ctk.CTkFont(size=12), border_width=2, 
-                                 fg_color=ACCENT_TEAL, hover_color="#00A6B2")
-            cb.pack(anchor="w", padx=10, pady=4)
+            cb = ctk.CTkCheckBox(card, text="", variable=var, width=20, fg_color=ACCENT_TEAL, hover_color="#00A6B2")
+            cb.pack(side="left", padx=(15, 5))
+
+            # Metadata Info
+            info = ctk.CTkFrame(card, fg_color="transparent")
+            info.pack(side="left", fill="both", expand=True, padx=5)
+            
+            ctk.CTkLabel(info, text=title, font=ctk.CTkFont(size=13, weight="bold"), text_color=TEXT_PRIMARY, anchor="w").pack(side="top", anchor="w", pady=(8, 0))
+            ctk.CTkLabel(info, text=artist, font=ctk.CTkFont(size=11), text_color=TEXT_MUTED, anchor="w").pack(side="top", anchor="w", pady=(0, 8))
+
+            # View Count Badge
+            v_badge = ctk.CTkFrame(card, fg_color=BG_INPUT, corner_radius=6, width=100, height=28)
+            v_badge.pack(side="right", padx=15)
+            v_badge.pack_propagate(False)
+            
+            views = rec.get('views', 0)
+            v_lbl = ctk.CTkLabel(v_badge, text=f"{fmt_views(views)} views", font=ctk.CTkFont(size=10, weight="bold"), text_color=ACCENT_GREEN if views > 0 else TEXT_MUTED)
+            v_lbl.pack(expand=True)
 
         # Actions
-        btn_frame = ctk.CTkFrame(top, fg_color="transparent")
-        btn_frame.pack(fill="x", side="bottom", pady=20, padx=20)
+        btn_frame = ctk.CTkFrame(top, fg_color=BG_PANEL, height=80, corner_radius=0)
+        btn_frame.pack(fill="x", side="bottom")
 
         def select_all(val):
-            for v, n in check_vars: v.set(val)
+            for v, n, r in check_vars: v.set(val)
             update_counter()
 
         def resolve_selected():
-            selected = [name for var, name in check_vars if var.get()]
-            if not selected: return
+            selected_items = [(rec, name) for var, name, rec in check_vars if var.get()]
+            if not selected_items: return
             
             top.destroy()
-            self._log(f"⚡ Resolving {len(selected)} selected tracks. Please wait...", level="info")
-            threading.Thread(target=self._batch_resolve, args=(selected,), daemon=True).start()
+            self._log(f"⚡ Queueing {len(selected_items)} selected tracks...", level="info")
+            threading.Thread(target=self._finalize_selection, args=(selected_items,), daemon=True).start()
 
-        ctk.CTkButton(btn_frame, text="CHECK ALL", width=100, fg_color=BG_INPUT, command=lambda: select_all(True)).pack(side="left", padx=5)
-        ctk.CTkButton(btn_frame, text="UNCHECK ALL", width=100, fg_color=BG_INPUT, command=lambda: select_all(False)).pack(side="left", padx=5)
-        ctk.CTkButton(btn_frame, text="RESOLVE & QUEUE SELECTED", fg_color=ACCENT_BLUE, font=ctk.CTkFont(size=12, weight="bold"), 
-                      command=resolve_selected).pack(side="right", padx=5, expand=True, fill="x")
+        ctk.CTkButton(btn_frame, text="CHECK ALL", width=120, height=36, fg_color=BG_INPUT, font=ctk.CTkFont(size=11), command=lambda: select_all(True)).pack(side="left", padx=20, pady=20)
+        ctk.CTkButton(btn_frame, text="UNCHECK ALL", width=120, height=36, fg_color=BG_INPUT, font=ctk.CTkFont(size=11), command=lambda: select_all(False)).pack(side="left", padx=0, pady=20)
+        ctk.CTkButton(btn_frame, text="✅  QUEUE SELECTED", fg_color=ACCENT_BLUE, text_color="white", font=ctk.CTkFont(size=13, weight="bold"), height=40,
+                      command=resolve_selected).pack(side="right", padx=20, pady=20, expand=True, fill="x")
 
-    def _batch_resolve(self, query_list):
-        found_urls = []
-        for i, query in enumerate(query_list):
-            self._log(f"  🔍 Resolving ({i+1}/{len(query_list)}): {query}", level="info")
-            url = self._resolve_yt_link(query)
-            if url: found_urls.append(url)
+    def _finalize_selection(self, items):
+        """Processes the final selection, resolving any links that weren't caught yet."""
+        found_data = []
+        for i, (rec, query) in enumerate(items):
+            if rec.get('yt_url'):
+                found_data.append((rec['yt_url'], rec['views']))
+            else:
+                self._log(f"  🔍 Resolving ({i+1}/{len(items)}): {query}", level="info")
+                res = self._resolve_yt_link(query)
+                if res: found_data.append(res)
         
-        if found_urls:
+        if found_data:
+            # Rank strictly by overall views (highest first)
+            found_data.sort(key=lambda x: x[1], reverse=True)
+            found_urls = [x[0] for x in found_data]
+            
             def update_ui():
-                self._url_textbox.delete("0.0", "end") # CLEAN SLATE!
+                self._url_textbox.delete("0.0", "end") 
                 self._url_textbox.insert("end", "\n".join(found_urls) + "\n")
                 self._on_url_change()
-                self._log(f"✨ Successfully discovered {len(found_urls)} music tracks!", level="header")
+                self._log(f"✨ Successfully added {len(found_urls)} tracks ranked by views!", level="header")
             self.after(0, update_ui)
         else:
             self._log("⚠ No matches found on YouTube for selected items.", level="warning")
@@ -2271,35 +2379,39 @@ class BisayaMusicHubApp(ctk.CTk):
                 
                 # Strict Filtering Keywords
                 whitelist = ['official audio', 'official music video', 'official video', 'music video', 'mv', 'topic']
-                blacklist = ['commentary', 'behind the scenes', 'bts', '8-bit', '8 bit', 'instrumental', 'karaoke', 'reaction', 'parody', 'interview', 'live stream']
+                blacklist = ['commentary', 'behind the scenes', 'bts', '8-bit', '8 bit', 'instrumental', 'karaoke', 'reaction', 'parody', 'interview', 'live stream', 'tutorial', 'how to', 'review', 'vlog']
 
                 for entry in info['entries']:
                     title = entry.get('title', '').lower()
                     uploader = entry.get('uploader', '').lower()
                     views = entry.get('view_count', 0) or 0
                     
-                    # 1. Base Score = View Count (Popularity)
-                    # We normalize views to prevent them from totally overriding relevance
-                    score = min(views / 100000, 500) 
-                    
-                    # 2. Whitelist Bonus (Accuracy)
-                    for word in whitelist:
-                        if word in title:
-                            score += 1000
-                    
-                    # Topic channels are highly reliable for "Official Audio"
-                    if ' - topic' in uploader:
-                        score += 500
+                    # 1. Skip Blacklisted
+                    if any(word in title for word in blacklist) or any(word in uploader for word in blacklist):
+                        continue
 
-                    # 3. Blacklist Penalty (Exclusion)
-                    for word in blacklist:
-                        if word in title:
-                            score -= 5000 
+                    # 2. Identification: Official vs Clean
+                    is_official = any(word in title for word in whitelist) or (' - topic' in uploader)
+                    
+                    # A "Clean" title has no brackets or metadata clutter (official, live, lyric, etc.)
+                    has_clutter = any(word in title for word in (whitelist + blacklist + ['official', 'lyrics', 'lyric', 'audio', 'video', 'video']))
+                    has_brackets = any(char in title for char in "()[]【】")
+                    is_clean = not has_clutter and not has_brackets
+                    
+                    # 3. Hierarchical Scoring: 
+                    # Priority 1: Official (~2B points)
+                    # Priority 2: Clean Title - Author (~1B points)
+                    # Priority 3: Views (Tie-breaker)
+                    score = views
+                    if is_official:
+                        score += 2_000_000_000
+                    elif is_clean:
+                        score += 1_000_000_000
                     
                     candidates.append({
                         'id': entry.get('id'),
                         'score': score,
-                        'title': title
+                        'views': views
                     })
 
                 # Sort by highest score
@@ -2307,7 +2419,7 @@ class BisayaMusicHubApp(ctk.CTk):
                 
                 if candidates and candidates[0]['score'] > -1000:
                     best_match = candidates[0]
-                    return f"https://www.youtube.com/watch?v={best_match['id']}"
+                    return (f"https://www.youtube.com/watch?v={best_match['id']}", best_match['views'])
                 
         except Exception:
             pass
@@ -2577,8 +2689,8 @@ class BisayaMusicHubApp(ctk.CTk):
             skip_dupes=self._skip_var.get(),
             use_prefix=self._prefix_var.get(),
             strip_symbols=self._strip_var.get(),
-            ffmpeg_path="",
-            log_queue=self._log_queue,
+            author_first=self._naming_var.get(),
+            log_queue=self._log_queue
         )
 
         self._dl_thread = threading.Thread(
